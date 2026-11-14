@@ -1,0 +1,329 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RecordStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+enum SessionStatus {
+  CREATED
+  PENDING_USER
+  PROCESSING
+  VERIFIED
+  NOT_VERIFIED
+  INCONCLUSIVE
+  MANUAL_REVIEW
+  EXPIRED
+  CANCELLED
+  PROVIDER_ERROR
+  REVOKED
+}
+
+enum VerificationKind {
+  AGE
+  IDENTITY
+}
+
+enum DecisionOutcome {
+  ALLOW
+  DENY
+  VERIFICATION_REQUIRED
+}
+
+model Tenant {
+  id String @id @default(uuid()) @db.Uuid
+  name String @db.VarChar(160)
+  status RecordStatus @default(ACTIVE)
+  createdAt DateTime @default(now()) @map("created_at")
+  applications Application[]
+  policies Policy[]
+  sessions VerificationSession[]
+  decisions AccessDecision[]
+  audits AuditEvent[]
+  mediaAssets MediaAsset[]
+  retentionRecords RetentionRecord[]
+  webhookEndpoints WebhookEndpoint[]
+  usageRecords UsageRecord[]
+  consentRecords ConsentRecord[]
+  @@map("tenants")
+}
+
+model Application {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  name String @db.VarChar(160)
+  environment String @db.VarChar(24)
+  allowedOrigins String[] @default([]) @map("allowed_origins")
+  status RecordStatus @default(ACTIVE)
+  createdAt DateTime @default(now()) @map("created_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  credentials ApplicationCredential[]
+  policies Policy[]
+  sessions VerificationSession[]
+  decisions AccessDecision[]
+  webhookEndpoints WebhookEndpoint[]
+  usageRecords UsageRecord[]
+  consentRecords ConsentRecord[]
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@map("applications")
+}
+
+model ApplicationCredential {
+  id String @id @default(uuid()) @db.Uuid
+  applicationId String @map("application_id") @db.Uuid
+  keyId String @unique @map("key_id") @db.VarChar(48)
+  secretHash String @map("secret_hash") @db.VarChar(256)
+  scopes String[]
+  expiresAt DateTime? @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  @@index([applicationId, revokedAt])
+  @@map("application_credentials")
+}
+
+model Policy {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  applicationId String @map("application_id") @db.Uuid
+  name String @db.VarChar(120)
+  purpose String @db.VarChar(120)
+  status RecordStatus @default(ACTIVE)
+  createdAt DateTime @default(now()) @map("created_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  versions PolicyVersion[]
+  @@unique([tenantId, id])
+  @@index([tenantId, applicationId, status])
+  @@map("policies")
+}
+
+model PolicyVersion {
+  id String @id @default(uuid()) @db.Uuid
+  policyId String @map("policy_id") @db.Uuid
+  version Int
+  rules Json
+  rulesDigest String @map("rules_digest") @db.VarChar(64)
+  effectiveFrom DateTime @default(now()) @map("effective_from")
+  effectiveUntil DateTime? @map("effective_until")
+  policy Policy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  sessions VerificationSession[]
+  consentRecords ConsentRecord[]
+  decisions AccessDecision[]
+  @@unique([policyId, version])
+  @@map("policy_versions")
+}
+
+model VerificationSession {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  applicationId String @map("application_id") @db.Uuid
+  policyVersionId String @map("policy_version_id") @db.Uuid
+  externalRefHash String @map("external_ref_hash") @db.VarChar(64)
+  purpose String @db.VarChar(120)
+  kind VerificationKind
+  status SessionStatus @default(CREATED)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  policyVersion PolicyVersion @relation(fields: [policyVersionId], references: [id], onDelete: Restrict)
+  result VerificationResult?
+  attempts VerificationAttempt[]
+  evidence VerificationEvidence[]
+  consentRecords ConsentRecord[]
+  decisions AccessDecision[]
+  @@unique([tenantId, applicationId, externalRefHash])
+  @@unique([tenantId, id])
+  @@index([tenantId, applicationId, status, expiresAt])
+  @@map("verification_sessions")
+}
+
+model VerificationResult {
+  id String @id @default(uuid()) @db.Uuid
+  sessionId String @unique @map("session_id") @db.Uuid
+  outcome String @db.VarChar(40)
+  assuranceLevel String @map("assurance_level") @db.VarChar(40)
+  reasonCodes String[] @default([]) @map("reason_codes")
+  validUntil DateTime @map("valid_until")
+  revokedAt DateTime? @map("revoked_at")
+  issuedAt DateTime @default(now()) @map("issued_at")
+  session VerificationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  @@map("verification_results")
+}
+
+model Provider {
+  id String @id @default(uuid()) @db.Uuid
+  name String @db.VarChar(120)
+  kind VerificationKind
+  status RecordStatus @default(ACTIVE)
+  attempts VerificationAttempt[]
+  @@unique([name, kind])
+  @@map("providers")
+}
+
+model VerificationAttempt {
+  id String @id @default(uuid()) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+  providerId String @map("provider_id") @db.Uuid
+  state String @db.VarChar(40)
+  providerRefCiphertext String? @map("provider_ref_ciphertext") @db.VarChar(512)
+  startedAt DateTime @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  session VerificationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  @@index([sessionId, startedAt])
+  @@map("verification_attempts")
+}
+
+model VerificationEvidence {
+  id String @id @default(uuid()) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+  method String @db.VarChar(60)
+  assuranceLevel String @map("assurance_level") @db.VarChar(40)
+  evidenceRefHash String @map("evidence_ref_hash") @db.VarChar(64)
+  collectedAt DateTime @default(now()) @map("collected_at")
+  validUntil DateTime @map("valid_until")
+  deletedAt DateTime? @map("deleted_at")
+  session VerificationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  @@index([sessionId, validUntil])
+  @@map("verification_evidence")
+}
+
+model ConsentRecord {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  applicationId String @map("application_id") @db.Uuid
+  sessionId String? @map("session_id") @db.Uuid
+  policyVersionId String? @map("policy_version_id") @db.Uuid
+  purpose String @db.VarChar(120)
+  noticeVersion String @map("notice_version") @db.VarChar(40)
+  action String @db.VarChar(24)
+  recordedAt DateTime @default(now()) @map("recorded_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  session VerificationSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  policyVersion PolicyVersion? @relation(fields: [policyVersionId], references: [id], onDelete: SetNull)
+  @@index([tenantId, applicationId, purpose, recordedAt])
+  @@map("consent_records")
+}
+
+model MediaAsset {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  resourceRefHash String @map("resource_ref_hash") @db.VarChar(64)
+  objectKey String @map("object_key") @db.VarChar(512)
+  status RecordStatus @default(ACTIVE)
+  checksum String? @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  deleteAt DateTime? @map("delete_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  classifications MediaClassification[]
+  @@unique([tenantId, resourceRefHash])
+  @@map("media_assets")
+}
+
+model MediaClassification {
+  id String @id @default(uuid()) @db.Uuid
+  mediaAssetId String @map("media_asset_id") @db.Uuid
+  category String @db.VarChar(60)
+  status String @db.VarChar(40)
+  policyVersion String @map("policy_version") @db.VarChar(40)
+  decidedBy String @map("decided_by") @db.VarChar(100)
+  createdAt DateTime @default(now()) @map("created_at")
+  mediaAsset MediaAsset @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
+  @@index([mediaAssetId, createdAt])
+  @@map("media_classifications")
+}
+
+model RetentionRecord {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  entityType String @map("entity_type") @db.VarChar(60)
+  entityRefHash String @map("entity_ref_hash") @db.VarChar(64)
+  ruleVersion String @map("rule_version") @db.VarChar(40)
+  deleteAfter DateTime @map("delete_after")
+  deletionStatus String @map("deletion_status") @db.VarChar(32)
+  deletedAt DateTime? @map("deleted_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@index([tenantId, deleteAfter, deletionStatus])
+  @@map("retention_records")
+}
+
+model WebhookEndpoint {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  applicationId String @map("application_id") @db.Uuid
+  url String @db.VarChar(2048)
+  secretHash String @map("secret_hash") @db.VarChar(256)
+  status RecordStatus @default(ACTIVE)
+  createdAt DateTime @default(now()) @map("created_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  @@index([tenantId, applicationId, status])
+  @@map("webhook_endpoints")
+}
+
+model UsageRecord {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  applicationId String @map("application_id") @db.Uuid
+  meter String @db.VarChar(60)
+  quantity Int @default(1)
+  occurredAt DateTime @default(now()) @map("occurred_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  @@index([tenantId, applicationId, meter, occurredAt])
+  @@map("usage_records")
+}
+
+model AccessDecision {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  applicationId String @map("application_id") @db.Uuid
+  sessionId String? @map("session_id") @db.Uuid
+  policyVersionId String @map("policy_version_id") @db.Uuid
+  resourceRefHash String @map("resource_ref_hash") @db.VarChar(64)
+  purpose String @db.VarChar(120)
+  audience String @db.VarChar(200)
+  scope String[]
+  outcome DecisionOutcome
+  reasonCode String @map("reason_code") @db.VarChar(64)
+  grantHash String? @unique @map("grant_hash") @db.VarChar(64)
+  decidedAt DateTime @default(now()) @map("decided_at")
+  expiresAt DateTime? @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  session VerificationSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  policyVersion PolicyVersion @relation(fields: [policyVersionId], references: [id], onDelete: Restrict)
+  @@index([tenantId, applicationId, resourceRefHash, expiresAt])
+  @@map("access_decisions")
+}
+
+model AuditEvent {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String? @map("tenant_id") @db.Uuid
+  applicationId String? @map("application_id") @db.Uuid
+  actorType String @map("actor_type") @db.VarChar(40)
+  actorRef String? @map("actor_ref") @db.VarChar(100)
+  action String @db.VarChar(100)
+  entityRef String? @map("entity_ref") @db.VarChar(100)
+  outcome String @db.VarChar(40)
+  correlationId String @map("correlation_id") @db.VarChar(80)
+  metadata Json?
+  occurredAt DateTime @default(now()) @map("occurred_at")
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  @@index([tenantId, occurredAt])
+  @@index([correlationId])
+  @@map("audit_events")
+}
